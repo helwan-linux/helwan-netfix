@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Helwan NetFix
+Comment=Helwan Linux Repair Tool (GUI)
+Exec=hel-netfix
+Icon=hel-netfix
+Terminal=false
+Type=Application
+Categories=System;Utility;
+StartupNotify=true
