@@ -21,7 +21,8 @@ COMMANDS = {
     "Clear Cache": "pkexec pacman -Scc --noconfirm", # Added --noconfirm
     "Fix Corrupted Packages": "pkexec pacman -Syu --overwrite '*' --noconfirm", # Added --noconfirm
     "Update System": "pkexec pacman -Syu --noconfirm", # Added --noconfirm
-    "Refresh Mirrors": "pkexec bash -c \"reflector --latest 10 --protocol https --sort rate --save /etc/pacman.d/mirrorlist\"",
+	#"Refresh Mirrors": "pkexec bash -c \"reflector --latest 10 --protocol https --sort rate --connection-timeout 20 --country Germany,France,Italy,Turkey,Sweden,Netherlands --save /etc/pacman.d/mirrorlist\"",    #"Refresh Mirrors": "pkexec bash -c \"reflector --latest 10 --protocol https --sort rate --save /etc/pacman.d/mirrorlist\"",
+    "Refresh Mirrors": "pkexec pacman -Syy --noconfirm",
     #"Reinstall Broken Packages": "pkexec bash -c \"pacman -S --noconfirm $(pacman -Qqn)\"",
     #"Test Output": "ls -l /", # New command for testing output
 }
@@ -271,6 +272,7 @@ class NetFixApp(QWidget):
             "- Fix Corrupted: Resolve overwrite errors.\n"
             "- Update: Sync system.\n"
             "- Refresh Mirrors: Get best servers.\n"
+            "- Reinstall Broken: Fix missing packages.\n"
             "- Full Fix: Runs all above."
         )
         QMessageBox.information(self, "Help", help_msg)
