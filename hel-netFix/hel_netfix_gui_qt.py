@@ -1,293 +1,225 @@
-# hel_netfix_gui_qt.py
-# SMA Coding - Helwan Linux Official Tool - Qt Edition
-
 import sys
 import subprocess
 import threading
 import os
+import signal
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton,
-    QLabel, QMessageBox, QHBoxLayout, QTextEdit, QProgressBar
+    QMessageBox, QHBoxLayout, QTextEdit, QProgressBar
 )
-from PyQt5.QtGui import QIcon, QTextCursor, QCursor
+from PyQt5.QtGui import QIcon, QCursor
 from PyQt5.QtCore import Qt, pyqtSignal, QObject
 
-# Use pkexec instead of sudo directly to request graphical privileges.
-# Note: pkexec usually requires correct Polkit policies to work smoothly.
-# If pkexec doesn't work, you might need to install a tool like `lxqt-policykit` or `gnome-polkit`
-# or use an alternative like gksu/kdesu (if installed) or run the script itself with sudo.
+# Final Command Configuration for Helwan Linux
 COMMANDS = {
-    "Repair Database": "pkexec pacman -D --asdeps $(pacman -Qdtq)",
-    "Clear Cache": "pkexec pacman -Scc --noconfirm", # Added --noconfirm
-    "Fix Corrupted Packages": "pkexec pacman -Syu --overwrite '*' --noconfirm", # Added --noconfirm
-    "Update System": "pkexec pacman -Syu --noconfirm", # Added --noconfirm
-	#"Refresh Mirrors": "pkexec bash -c \"reflector --latest 10 --protocol https --sort rate --connection-timeout 20 --country Germany,France,Italy,Turkey,Sweden,Netherlands --save /etc/pacman.d/mirrorlist\"",    #"Refresh Mirrors": "pkexec bash -c \"reflector --latest 10 --protocol https --sort rate --save /etc/pacman.d/mirrorlist\"",
-    "Refresh Mirrors": "pkexec pacman -Syy --noconfirm",
-    #"Reinstall Broken Packages": "pkexec bash -c \"pacman -S --noconfirm $(pacman -Qqn)\"",
-    #"Test Output": "ls -l /", # New command for testing output
+    "Repair Database": {
+        "command": ["pkexec", "pacman", "-D", "--asdeps"],
+        "pre_command": ["pacman", "-Qdtq"],
+        "desc": "Fixing orphaned packages."
+    },
+    "Clear Cache": {
+        "command": ["pkexec", "bash", "-c", "yes | pacman -Scc"],
+        "desc": "Cleaning package cache."
+    },
+    "Fix Corrupted Packages": {
+        "command": ["pkexec", "pacman", "-Syu", "--overwrite", "*", "--noconfirm"],
+        "desc": "Overwriting corrupted files and updating."
+    },
+    "Update System": {
+        "command": ["pkexec", "pacman", "-Syu", "--noconfirm"],
+        "desc": "Standard system update."
+    },
+    "Refresh Mirrors": {
+        "command": ["pkexec", "pacman", "-Syy", "--noconfirm"],
+        "desc": "Refreshing repository databases."
+    },
 }
 
-# Intermediate class for sending signals from a Thread to the GUI Thread
 class WorkerSignals(QObject):
-    output_appended = pyqtSignal(str) # Signal to append text to the output area (GUI)
-    command_started = pyqtSignal(str, QPushButton) # Signal for a command start (command name and button)
-    command_finished = pyqtSignal(str, QPushButton, bool) # Signal for a command finish (original name, button, success status)
-    full_fix_started = pyqtSignal() # Signal for the start of full auto fix
-    full_fix_finished = pyqtSignal(bool) # Signal for the end of full auto fix (success status)
+    output_appended = pyqtSignal(str)
+    command_started = pyqtSignal(str, QPushButton)
+    command_finished = pyqtSignal(str, QPushButton, bool)
+    full_fix_started = pyqtSignal()
+    full_fix_step_update = pyqtSignal(str, QPushButton)
+    full_fix_finished = pyqtSignal(bool)
 
 class NetFixApp(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Helwan Linux - NetFix Tool")
-        self.setFixedSize(600, 550) # Increased window size to accommodate output area and progress bar
+        self.setFixedSize(600, 650)
+        self.current_process = None
+        self.is_cancelled = False
 
-        # Initialize signal object
         self.signals = WorkerSignals()
-        # Connect output_appended signal to the slot that updates QTextEdit
-        self.signals.output_appended.connect(self._append_output_to_text_edit)
-        self.signals.command_started.connect(self._on_command_started)
-        self.signals.command_finished.connect(self._on_command_finished)
-        self.signals.full_fix_started.connect(self._on_full_fix_started)
-        self.signals.full_fix_finished.connect(self._on_full_fix_finished)
+        self.signals.output_appended.connect(self._append_output)
+        self.signals.command_started.connect(self._on_start)
+        self.signals.command_finished.connect(self._on_finish)
+        self.signals.full_fix_started.connect(self._on_full_start)
+        self.signals.full_fix_step_update.connect(self._on_step_update)
+        self.signals.full_fix_finished.connect(self._on_full_finish)
 
-        # Load icon
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "netfix.png")
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
-        else:
-            # Warning message if icon not found
-            print(f"Warning: Icon file not found at {icon_path}")
+        self.init_ui()
+
+    def init_ui(self):
+        # Icon handling
+        icon_name = "netfix.png"
+        icon_paths = [os.path.join(os.path.dirname(__file__), icon_name), f"/usr/share/pixmaps/{icon_name}"]
+        for path in icon_paths:
+            if os.path.exists(path):
+                self.setWindowIcon(QIcon(path))
+                break
 
         layout = QVBoxLayout()
+        self.buttons = {}
 
-        self.buttons = {} # Dictionary to store buttons by their original labels
-        # Create buttons for commands
-        for label in COMMANDS:
+        for label, data in COMMANDS.items():
             btn = QPushButton(label)
-            # Pass the button object itself to the run_command function
-            btn.clicked.connect(lambda _, cmd=COMMANDS[label], lbl=label, button=btn: self.run_command(cmd, lbl, button))
+            btn.clicked.connect(lambda _, l=label, b=btn, d=data: self.run_task(l, b, d))
             layout.addWidget(btn)
-            self.buttons[label] = btn # Store the button
+            self.buttons[label] = btn
 
-        # Full auto fix button
         self.full_fix_btn = QPushButton("Full Auto Fix")
-        self.full_fix_btn.clicked.connect(self.run_all_commands)
+        self.full_fix_btn.setStyleSheet("background-color: #2c3e50; color: white; font-weight: bold; padding: 8px;")
+        self.full_fix_btn.clicked.connect(self.run_full_fix)
         layout.addWidget(self.full_fix_btn)
 
-        # Help & About buttons
-        hbox = QHBoxLayout()
-        self.help_btn = QPushButton("Help")
-        self.help_btn.clicked.connect(self.show_help)
-        self.about_btn = QPushButton("About")
-        self.about_btn.clicked.connect(self.show_about)
-        hbox.addWidget(self.help_btn)
-        hbox.addWidget(self.about_btn)
-        layout.addLayout(hbox)
+        self.cancel_btn = QPushButton("Stop Current Operation")
+        self.cancel_btn.setStyleSheet("background-color: #c0392b; color: white;")
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.clicked.connect(self.cancel_task)
+        layout.addWidget(self.cancel_btn)
 
-        # Progress Bar
-        self.progressBar = QProgressBar(self)
-        self.progressBar.setTextVisible(False) # Hide percentage text
-        self.progressBar.setRange(0, 0) # Set progress bar to "indeterminate" mode
-        self.progressBar.hide() # Hide progress bar initially
+        self.progressBar = QProgressBar()
+        self.progressBar.setRange(0, 0)
+        self.progressBar.hide()
         layout.addWidget(self.progressBar)
 
-        # Output TextEdit for detailed output
-        self.output_text_edit = QTextEdit()
-        self.output_text_edit.setReadOnly(True)
-        self.output_text_edit.setText("Ready.")
-        layout.addWidget(self.output_text_edit)
+        self.console = QTextEdit()
+        self.console.setReadOnly(True)
+        self.console.setStyleSheet("background-color: #1a1a1a; color: #00ff41; font-family: monospace;")
+        self.console.setText("Helwan Linux NetFix Ready...")
+        layout.addWidget(self.console)
 
         self.setLayout(layout)
 
-    # Function to control enabling/disabling of all main UI buttons
-    def set_ui_enabled(self, enabled):
-        for btn_name, btn_obj in self.buttons.items():
-            btn_obj.setEnabled(enabled)
-        self.full_fix_btn.setEnabled(enabled)
-        self.help_btn.setEnabled(enabled)
-        self.about_btn.setEnabled(enabled)
-        if enabled:
-            QApplication.restoreOverrideCursor() # Restore default mouse cursor
-        else:
-            QApplication.setOverrideCursor(QCursor(Qt.WaitCursor)) # Change mouse cursor to wait cursor
-
-    # This function is the slot called via the signal to append output
-    def _append_output_to_text_edit(self, text):
-        self.output_text_edit.append(text)
-        # Scroll to the bottom automatically
-        self.output_text_edit.verticalScrollBar().setValue(self.output_text_edit.verticalScrollBar().maximum())
-
-    def _on_command_started(self, command_name, button):
-        self.set_ui_enabled(False) # Disable the entire UI
-        button.setText(f"Processing: {command_name}...")
-        button.setEnabled(False) # Explicitly disable the button itself for confirmation
-        self.progressBar.show() # Show the progress bar
-
-    def _on_command_finished(self, original_name, button, success):
-        button.setText(original_name) # Restore original button text
-        self.set_ui_enabled(True) # Re-enable the entire UI
-        self.progressBar.hide() # Hide the progress bar
-        # Add a success/failure message to GUI output
-        if success:
-            self._append_output_to_text_edit("✅ Command finished successfully.")
-        else:
-            self._append_output_to_text_edit("❌ Command failed.")
-
-    def _on_full_fix_started(self):
-        self.set_ui_enabled(False)
-        self.full_fix_btn.setText("Running Full Fix...")
-        self.full_fix_btn.setEnabled(False)
-        self.progressBar.show() # Show the progress bar
-
-    def _on_full_fix_finished(self, success):
-        self.full_fix_btn.setText("Full Auto Fix")
-        self.set_ui_enabled(True)
-        self.progressBar.hide() # Hide the progress bar
-        if success:
-            self._append_output_to_text_edit("\n✅ All Full Auto Fix tasks completed successfully.")
-        else:
-            self._append_output_to_text_edit("\n❌ Full Auto Fix aborted due to an error.")
-
-
-    def run_command(self, command, name="", button=None):
-        def task():
-            self.signals.command_started.emit(name, button) # Emit signal that command has started
-            self.signals.output_appended.emit(f"\n--- Running: {name if name else command} ---")
-            print(f"\n--- Running: {name if name else command} ---") # Print to terminal
-
-            success = False
+    def check_lock(self):
+        lock = "/var/lib/pacman/db.lck"
+        if os.path.exists(lock):
+            self.signals.output_appended.emit("Removing database lock...")
             try:
-                # Using Popen to get live output
-                process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+                subprocess.run(["pkexec", "rm", lock], check=True)
+                return True
+            except:
+                return False
+        return True
 
-                # Read stdout line by line
-                for line in iter(process.stdout.readline, ''):
-                    self.signals.output_appended.emit(line.strip())
-                    print(line.strip()) # Print to terminal
+    def cancel_task(self):
+        if self.current_process:
+            self.is_cancelled = True
+            try:
+                pid = self.current_process.pid
+                subprocess.run(["pkexec", "kill", "-9", str(pid)], check=False)
+                self.current_process.terminate()
+            except:
+                pass
+            self.signals.output_appended.emit("\nOperation cancelled by user.")
 
-                # Read stderr line by line (after stdout is exhausted or if stderr is used)
-                for line in iter(process.stderr.readline, ''):
-                    self.signals.output_appended.emit(f"ERROR: {line.strip()}")
-                    print(f"ERROR: {line.strip()}") # Print to terminal
+    def _execute(self, cmd):
+        if self.is_cancelled: return -1, False
+        self.signals.output_appended.emit(f"\nExecuting: {' '.join(cmd)}")
+        try:
+            self.current_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, preexec_fn=os.setsid)
+            for line in iter(self.current_process.stdout.readline, ''):
+                if self.is_cancelled: break
+                self.signals.output_appended.emit(line.strip())
+            rc = self.current_process.wait()
+            return rc, (rc == 0 and not self.is_cancelled)
+        except Exception as e:
+            self.signals.output_appended.emit(f"Error: {e}")
+            return -1, False
 
-                process.stdout.close()
-                process.stderr.close()
-                return_code = process.wait() # Wait for the process to terminate
-
-                if return_code != 0:
-                    self.signals.output_appended.emit(f"❌ Command exited with error code: {return_code}")
-                    print(f"❌ Command exited with error code: {return_code}")
-                    success = False
-                else:
-                    success = True
-
-            except FileNotFoundError:
-                self.signals.output_appended.emit("❌ Error: Command or a part of it not found. Make sure 'pkexec' and other tools are installed and in PATH.")
-                print("❌ Error: Command or a part of it not found. Make sure 'pkexec' and other tools are installed in PATH.")
-                success = False
-            except Exception as e: # Catch any other unexpected errors
-                self.signals.output_appended.emit(f"❌ An unexpected error occurred: {e}")
-                print(f"❌ An unexpected error occurred: {e}")
-                success = False
-
-            self.signals.output_appended.emit("--- Command Finished ---")
-            print("--- Command Finished ---")
-            self.signals.command_finished.emit(name, button, success) # Emit signal that command has finished with success status
-        threading.Thread(target=task).start()
-
-    def run_all_commands(self):
-        def task():
-            self.signals.full_fix_started.emit() # Emit signal that full fix has started
-            self.signals.output_appended.emit("\n--- Starting Full Auto Fix ---")
-            print("\n--- Starting Full Auto Fix ---")
-
-            # Store original texts of buttons to restore them later
-            original_button_texts = {name: self.buttons[name].text() for name in COMMANDS}
-            all_commands_successful = True
-
-            for name, command in COMMANDS.items():
-                current_button = self.buttons[name]
-                self.signals.output_appended.emit(f"\nRunning: {name}")
-                print(f"\nRunning: {name}")
-                # Update individual button status (even during full fix)
-                self.signals.command_started.emit(name, current_button) # This will hide progress bar if it's already shown, then show it again.
-
-                command_success = False
-                try:
-                    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
-
-                    for line in iter(process.stdout.readline, ''):
-                        self.signals.output_appended.emit(line.strip())
-                        print(line.strip())
-
-                    for line in iter(process.stderr.readline, ''):
-                        self.signals.output_appended.emit(f"ERROR: {line.strip()}")
-                        print(f"ERROR: {line.strip()}")
-
-                    process.stdout.close()
-                    process.stderr.close()
-                    return_code = process.wait()
-
-                    if return_code != 0:
-                        self.signals.output_appended.emit(f"❌ Command exited with error code: {return_code}")
-                        print(f"❌ Command exited with error code: {return_code}")
-                        command_success = False
-                    else:
-                        command_success = True
-
-                except FileNotFoundError:
-                    self.signals.output_appended.emit(f"❌ Error: Command '{name}' or a part of it not found. Check installation.")
-                    print(f"❌ Error: Command '{name}' or a part of it not found. Check installation.")
-                    command_success = False
-                except Exception as e:
-                    self.signals.output_appended.emit(f"❌ An unexpected error occurred during {name}: {e}")
-                    print(f"❌ An unexpected error occurred during {name}: {e}")
-                    command_success = False
-
-                if not command_success:
-                    all_commands_successful = False
-                    self.signals.output_appended.emit(f"--- Full Auto Fix Aborted due to {name} failure ---")
-                    print(f"--- Full Auto Fix Aborted due to {name} failure ---")
-                    # Restore button text and hide progress bar if failed here
-                    self.signals.command_finished.emit(original_button_texts[name], current_button, command_success)
-                    self.signals.full_fix_finished.emit(all_commands_successful) # Signal that full fix has finished (with failure)
+    def run_task(self, name, btn, data):
+        def t():
+            self.is_cancelled = False
+            if not self.check_lock(): return
+            self.signals.command_started.emit(name, btn)
+            
+            final_cmd = list(data['command'])
+            if "pre_command" in data:
+                res = subprocess.run(data['pre_command'], capture_output=True, text=True)
+                targets = res.stdout.split()
+                if not targets:
+                    self.signals.output_appended.emit("System is clean. No targets found.")
+                    self.signals.command_finished.emit(name, btn, True)
                     return
+                final_cmd.extend(targets)
 
-                # Restore button text after each successful command (for visibility during Full Fix)
-                self.signals.command_finished.emit(original_button_texts[name], current_button, command_success)
+            _, success = self._execute(final_cmd)
+            self.signals.command_finished.emit(name, btn, success)
+        threading.Thread(target=t, daemon=True).start()
 
+    def run_full_fix(self):
+        def t():
+            self.is_cancelled = False
+            if not self.check_lock(): return
+            self.signals.full_fix_started.emit()
+            for name, data in COMMANDS.items():
+                if self.is_cancelled: break
+                self.signals.full_fix_step_update.emit(name, self.buttons[name])
+                
+                final_cmd = list(data['command'])
+                if "pre_command" in data:
+                    res = subprocess.run(data['pre_command'], capture_output=True, text=True)
+                    targets = res.stdout.split()
+                    if not targets: continue
+                    final_cmd.extend(targets)
+                
+                _, success = self._execute(final_cmd)
+                if not success: break
+            self.signals.full_fix_finished.emit(not self.is_cancelled)
+        threading.Thread(target=t, daemon=True).start()
 
-            self.signals.output_appended.emit("\n✅ All Full Auto Fix tasks completed successfully.")
-            print("\n✅ All Full Auto Fix tasks completed successfully.")
-            self.signals.output_appended.emit("--- Full Auto Fix Finished ---")
-            print("--- Full Auto Fix Finished ---")
-            self.signals.full_fix_finished.emit(all_commands_successful) # Signal that full fix has finished (with success)
-        threading.Thread(target=task).start()
+    # UI Slots
+    def _append_output(self, text):
+        self.console.append(text)
+        self.console.verticalScrollBar().setValue(self.console.verticalScrollBar().maximum())
 
-    def show_help(self):
-        help_msg = (
-            "This tool provides quick fixes for Arch-based systems:\n"
-            "- Repair Database: Clean unused packages.\n"
-            "- Clear Cache: Remove old packages.\n"
-            "- Fix Corrupted: Resolve overwrite errors.\n"
-            "- Update: Sync system.\n"
-            "- Refresh Mirrors: Get best servers.\n"
-            "- Reinstall Broken: Fix missing packages.\n"
-            "- Full Fix: Runs all above."
-        )
-        QMessageBox.information(self, "Help", help_msg)
+    def _on_start(self, name, btn):
+        self._toggle_ui(False)
+        self.progressBar.show()
 
-    def show_about(self):
-        about_text = (
-            "Helwan Linux NetFix GUI\n"
-            "Version 1.0\n"
-            "By SMA Coding / Helwan Linux Team\n"
-            "Saeed Badrelden : helwanlinux@gmail.com"
-        )
-        QMessageBox.information(self, "About", about_text)
+    def _on_finish(self, name, btn, success):
+        self._toggle_ui(True)
+        self.progressBar.hide()
+        if success:
+            QMessageBox.information(self, "Success", f"Task '{name}' completed successfully!")
+        elif not self.is_cancelled:
+            QMessageBox.critical(self, "Error", f"Task '{name}' failed. Check logs.")
+
+    def _on_full_start(self):
+        self._toggle_ui(False)
+        self.progressBar.show()
+
+    def _on_full_finish(self, success):
+        self._toggle_ui(True)
+        self.progressBar.hide()
+        for n, b in self.buttons.items(): b.setText(n)
+        if success:
+            QMessageBox.information(self, "Complete", "System optimization finished successfully!")
+
+    def _on_step_update(self, name, btn):
+        btn.setText(f">> {name}")
+
+    def _toggle_ui(self, enabled):
+        for b in self.buttons.values(): b.setEnabled(enabled)
+        self.full_fix_btn.setEnabled(enabled)
+        self.cancel_btn.setEnabled(not enabled)
+        cursor = Qt.WaitCursor if not enabled else Qt.ArrowCursor
+        QApplication.setOverrideCursor(QCursor(cursor)) if not enabled else QApplication.restoreOverrideCursor()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = NetFixApp()
-    window.show()
+    win = NetFixApp()
+    win.show()
     sys.exit(app.exec_())
