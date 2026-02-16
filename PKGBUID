@@ -1,7 +1,7 @@
 # Maintainer: Saeed Badrelden <helwanlinux@gmail.com>
 pkgname=hel-netfix
 pkgver=1.0
-pkgrel=1
+pkgrel=2
 pkgdesc="Helwan Linux Network Repair GUI Tool (PyQt5)"
 arch=('any')
 url="https://github.com/helwan-linux/helwan-netfix"
@@ -33,3 +33,4 @@ package() {
     install -m644 "$srcdir/helwan-netfix/hel-netFix/netfix.png" "$pkgdir/usr/share/pixmaps/hel-netfix.png"
   fi
 }
+
